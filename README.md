@@ -1,35 +1,16 @@
-# Entertainment Control System — MVP
+# Entertainment Control System — MVP v2
 
-A simple multi-account web application for entertainment request submission and manager approval.
+Multi-account Flask web application for entertainment request submission, manager approval, Marketing dashboard, monthly Accounting budget control, and one-page PDF output based on the provided Entertainment Excel form.
 
-## Features
-- Login with role-based accounts: Member, Manager, Admin
-- Member entertainment request form
-- Multiple entertained persons (name + level)
-- Receipt upload (JPG/JPEG/PNG/PDF)
-- Manager waiting-approval list
-- Approve / reject with reason
-- Member request history and status
-- Download approved/reviewed request as PDF
-- Admin dashboard with users, status totals, and all requests
-- SQLite database (single-file)
-
-## Demo accounts
+Demo accounts:
 - Member: `member` / `member123`
+- Member: `member2` / `member123`
+- Member: `member3` / `member123`
 - Manager: `manager` / `manager123`
 - Admin: `admin` / `admin123`
 
-Change these passwords before real use.
-
-## Run on Windows / macOS / Linux
-1. Install Python 3.10+.
-2. Open a terminal in this folder.
-3. `python -m venv .venv`
-4. Activate it:
-   - Windows PowerShell: `.venv\\Scripts\\Activate.ps1`
-   - macOS/Linux: `source .venv/bin/activate`
-5. `pip install -r requirements.txt`
-6. `python app.py`
-7. Open `http://127.0.0.1:5000`
-
-The database is created automatically as `entertainment.db` and receipts are stored in `uploads/`.
+Run locally:
+```bash
+pip install -r requirements.txt
+gunicorn app:app
+```
