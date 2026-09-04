@@ -25,6 +25,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE, password TEXT, name TEXT, role TEXT, manager_id INTEGER, department TEXT DEFAULT 'Marketing');
     CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT, request_no TEXT UNIQUE, member_id INTEGER, company TEXT, people_count INTEGER, place TEXT, amount REAL, entertainment_date TEXT, receipt_file TEXT, status TEXT DEFAULT 'Waiting Approval', rejection_reason TEXT, submitted_at TEXT, approved_at TEXT, approver_id INTEGER, purpose TEXT DEFAULT '', cost_estimation REAL DEFAULT 0, cost_actual REAL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS entertained_people(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, name TEXT, level TEXT);
+    CREATE TABLE IF NOT EXISTS sugity_members(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, name TEXT);
     CREATE TABLE IF NOT EXISTS budgets(id INTEGER PRIMARY KEY AUTOINCREMENT, month TEXT UNIQUE, department TEXT DEFAULT 'Marketing', amount REAL NOT NULL DEFAULT 0, updated_at TEXT);
     ''')
     # Lightweight migration for databases created by the MVP.
@@ -116,11 +117,23 @@ def member_dashboard():
     budget=c.execute("SELECT amount FROM budgets WHERE month=? AND department='Marketing'",(month,)).fetchone()
     budget_amount=(budget['amount'] if budget else 0) or 0
     pending=c.execute("SELECT COUNT(*) n FROM requests r JOIN users u ON u.id=r.member_id WHERE u.department='Marketing' AND r.status='Waiting Approval'").fetchone()['n']
+    # Six-month rolling chart ending at the selected dashboard month.
+    y,m=map(int,month.split('-'))
+    chart_months=[]
+    for offset in range(5,-1,-1):
+        yy=y; mm=m-offset
+        while mm<=0: yy-=1; mm+=12
+        while mm>12: yy+=1; mm-=12
+        key=f'{yy:04d}-{mm:02d}'
+        actual=c.execute("SELECT COALESCE(SUM(r.cost_actual),SUM(r.amount),0) total FROM requests r JOIN users u ON u.id=r.member_id WHERE u.department='Marketing' AND r.status='Approved' AND strftime('%Y-%m',r.entertainment_date)=?",(key,)).fetchone()['total'] or 0
+        b=c.execute("SELECT amount FROM budgets WHERE month=? AND department='Marketing'",(key,)).fetchone()
+        chart_months.append({'month':key,'label':datetime.strptime(key,'%Y-%m').strftime("%b'%y"),'actual':float(actual),'budget':float(b['amount']) if b else 0})
+    chart_max=max([x['actual'] for x in chart_months]+[x['budget'] for x in chart_months]+[1])
     c.close()
     status={'Waiting Approval':0,'Approved':0,'Rejected':0}
     for x in counts: status[x['status']]=x['n']
     utilization=(dept_actual/budget_amount*100) if budget_amount else None
-    return render_template('member.html',requests=mine,month=month,status=status,members=members,dept_actual=dept_actual,budget_amount=budget_amount,utilization=utilization,pending_dept=pending)
+    return render_template('member.html',requests=mine,month=month,status=status,members=members,dept_actual=dept_actual,budget_amount=budget_amount,utilization=utilization,pending_dept=pending,chart_months=chart_months,chart_max=chart_max)
 
 @app.route('/member/new',methods=['GET','POST'])
 def new_request():
@@ -131,8 +144,9 @@ def new_request():
         amount=float(request.form.get('amount') or 0); estimation=float(request.form.get('cost_estimation') or amount); actual=float(request.form.get('cost_actual') or amount)
         count=int(request.form.get('people_count') or 0)
         names=request.form.getlist('person_name'); levels=request.form.getlist('person_level')
-        if not company or not place or not datev or not purpose or count<1 or len(names)!=count or any(not x.strip() for x in names):
-            flash('Please complete all required fields.','error'); return render_template('new_request.html')
+        sugity_names=[x.strip() for x in request.form.getlist('sugity_member') if x.strip()]
+        if not company or not place or not datev or not purpose or count<1 or len(names)!=count or any(not x.strip() for x in names) or len(sugity_names)>7:
+            flash('Please complete all required fields. You can enter up to 7 Sugity Members.','error'); return render_template('new_request.html')
         receipt=request.files.get('receipt'); filename=None
         if receipt and receipt.filename:
             ext=receipt.filename.rsplit('.',1)[-1].lower() if '.' in receipt.filename else ''
@@ -142,6 +156,7 @@ def new_request():
         c=db(); cur=c.execute('''INSERT INTO requests(request_no,member_id,company,people_count,place,amount,entertainment_date,receipt_file,status,submitted_at,purpose,cost_estimation,cost_actual)
                                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',(reqno,session['uid'],company,count,place,actual,datev,filename,'Waiting Approval',datetime.now().isoformat(timespec='seconds'),purpose,estimation,actual)); rid=cur.lastrowid
         for n,l in zip(names,levels): c.execute('INSERT INTO entertained_people(request_id,name,level) VALUES(?,?,?)',(rid,n.strip(),l.strip()))
+        for n in sugity_names: c.execute('INSERT INTO sugity_members(request_id,name) VALUES(?,?)',(rid,n))
         c.commit(); c.close(); return redirect(url_for('member_dashboard'))
     return render_template('new_request.html')
 
@@ -149,10 +164,10 @@ def new_request():
 def request_detail(rid):
     r=login_required(('member','manager','admin'))
     if r:return r
-    c=db(); req=c.execute('''SELECT r.*,u.name member_name,a.name approver_name FROM requests r JOIN users u ON u.id=r.member_id LEFT JOIN users a ON a.id=r.approver_id WHERE r.id=?''',(rid,)).fetchone(); people=c.execute('SELECT * FROM entertained_people WHERE request_id=?',(rid,)).fetchall(); c.close()
+    c=db(); req=c.execute('''SELECT r.*,u.name member_name,a.name approver_name FROM requests r JOIN users u ON u.id=r.member_id LEFT JOIN users a ON a.id=r.approver_id WHERE r.id=?''',(rid,)).fetchone(); people=c.execute('SELECT * FROM entertained_people WHERE request_id=?',(rid,)).fetchall(); sugity=c.execute('SELECT * FROM sugity_members WHERE request_id=? ORDER BY id',(rid,)).fetchall(); c.close()
     if not req: abort(404)
     if session['role']=='member' and req['member_id']!=session['uid']: abort(403)
-    return render_template('detail.html',req=req,people=people)
+    return render_template('detail.html',req=req,people=people,sugity=sugity)
 
 @app.route('/receipt/<filename>')
 def receipt(filename):
@@ -201,7 +216,7 @@ def set_budget():
 def download(rid):
     r=login_required(('member','manager','admin'))
     if r:return r
-    c=db(); req=c.execute('''SELECT r.*,u.name member_name,a.name approver_name FROM requests r JOIN users u ON u.id=r.member_id LEFT JOIN users a ON a.id=r.approver_id WHERE r.id=?''',(rid,)).fetchone(); people=c.execute('SELECT * FROM entertained_people WHERE request_id=? ORDER BY id',(rid,)).fetchall(); c.close()
+    c=db(); req=c.execute('''SELECT r.*,u.name member_name,a.name approver_name FROM requests r JOIN users u ON u.id=r.member_id LEFT JOIN users a ON a.id=r.approver_id WHERE r.id=?''',(rid,)).fetchone(); people=c.execute('SELECT * FROM entertained_people WHERE request_id=? ORDER BY id',(rid,)).fetchall(); sugity=c.execute('SELECT * FROM sugity_members WHERE request_id=? ORDER BY id',(rid,)).fetchall(); c.close()
     if not req or (session['role']=='member' and req['member_id']!=session['uid']): abort(403)
     # One-page PDF inspired by the uploaded Excel form. Receipt is kept in the system, not embedded in the form.
     from reportlab.lib.pagesizes import A4
@@ -231,7 +246,7 @@ def download(rid):
     while len(people10)<10: people10.append(None)
     for i in range(5):
         p1=people10[i]; p2=people10[i+5]
-        rows.append([Paragraph('Name (Title)' if i==0 else '',small), Paragraph(f'{i+1}.',small), Paragraph((p1['name'] if p1 else ''),small), Paragraph(f'{i+6}.',small), Paragraph((p2['name'] if p2 else ''),small)])
+        rows.append([Paragraph('Name (Title)' if i==0 else '',small), Paragraph(f'{i+1}.',small), Paragraph(((p1['name'] + (' ('+p1['level']+')' if p1['level'] else '')) if p1 else ''),small), Paragraph(f'{i+6}.',small), Paragraph(((p2['name'] + (' ('+p2['level']+')' if p2['level'] else '')) if p2 else ''),small)])
     pt=Table(rows,colWidths=[26*mm,8*mm,70*mm,8*mm,70*mm],rowHeights=[7.5*mm]*5)
     pt.setStyle(TableStyle([('BOX',(1,0),(-1,-1),.6,colors.black),('INNERGRID',(1,0),(-1,-1),.35,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),4),('RIGHTPADDING',(0,0),(-1,-1),4)])); story.append(pt)
     purpose=str(req['purpose'] or '')
@@ -241,12 +256,37 @@ def download(rid):
         ['', '', Paragraph('<b>* Place</b>',small), Paragraph(': '+str(req['place']),small)],
     ],colWidths=[26*mm,82*mm,35*mm,39*mm],rowHeights=[9*mm,8*mm,8*mm])
     details.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LINEBELOW',(1,0),(1,-1),.35,colors.black),('LINEBELOW',(3,0),(3,-1),.35,colors.black),('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2)])); story.append(Spacer(1,2*mm)); story.append(details)
-    member_rows=[['Sugity Members','','Proposed Division','MGR','GM','DIR','Accounting'],['','','PLAN','','','', ''],['','','ACTUAL','','','', '']]
-    # Put submitted member and approver into the lower section without inventing approval hierarchy.
-    member_rows[1][0]=req['member_name']; member_rows[2][0]=req['approver_name'] or ''
-    member_rows[1][2]='PLAN'; member_rows[2][2]='ACTUAL'; member_rows[1][6]=''; member_rows[2][6]=''
-    lower=Table(member_rows,colWidths=[35*mm,18*mm,22*mm,22*mm,22*mm,22*mm,31*mm],rowHeights=[8*mm,13*mm,13*mm])
-    lower.setStyle(TableStyle([('SPAN',(0,0),(1,0)),('SPAN',(2,0),(5,0)),('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),('BACKGROUND',(0,0),(-1,0),colors.whitesmoke),('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('FONTSIZE',(0,0),(-1,-1),7)])); story.append(Spacer(1,3*mm)); story.append(lower)
+    # Lower section follows the supplied Entertainment Form structure exactly:
+    # Sugity Members (2 columns), Proposed Division (MGR/GM/DIR + PLAN/ACTUAL), Accounting.
+    sugity_names=[x['name'] for x in sugity][:7]
+    while len(sugity_names)<7: sugity_names.append('')
+    sugity_table=Table(
+        [['Sugity Members','']] + [[sugity_names[i], sugity_names[i+1] if i+1<7 else ''] for i in range(0,7,2)],
+        colWidths=[27*mm,27*mm], rowHeights=[7*mm]+[6.5*mm]*4
+    )
+    sugity_table.setStyle(TableStyle([
+        ('SPAN',(0,0),(1,0)),('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('FONTSIZE',(0,0),(-1,-1),7),
+    ]))
+    # 4-row division block: title, MGR/GM/DIR, PLAN, ACTUAL.
+    div_table=Table(
+        [['Proposed Division','',''],['MGR','GM','DIR'],['PLAN','',''],['ACTUAL','','']],
+        colWidths=[22*mm,22*mm,22*mm], rowHeights=[7*mm,7*mm,6.5*mm,6.5*mm]
+    )
+    div_table.setStyle(TableStyle([
+        ('SPAN',(0,0),(2,0)),('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('FONTSIZE',(0,0),(-1,-1),7),
+    ]))
+    accounting_table=Table(
+        [['Accounting'],[''],[''],['']], colWidths=[31*mm], rowHeights=[7*mm,7*mm,6.5*mm,6.5*mm]
+    )
+    accounting_table.setStyle(TableStyle([
+        ('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('FONTSIZE',(0,0),(-1,-1),7),
+    ]))
+    lower=Table([[sugity_table,div_table,accounting_table]],colWidths=[54*mm,66*mm,31*mm],rowHeights=[27*mm])
+    lower.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
+    story.append(Spacer(1,3*mm)); story.append(lower)
     story.append(Spacer(1,2*mm)); story.append(Paragraph(f'Request No.: {req["request_no"]} &nbsp;&nbsp; Status: {req["status"]} &nbsp;&nbsp; Receipt: retained in system',small))
     doc.build(story); buf.seek(0)
     return send_file(buf,as_attachment=True,download_name=f"{req['request_no']}.pdf",mimetype='application/pdf')

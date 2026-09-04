@@ -11,7 +11,30 @@
   <div class="card stat"><small>My Approved Amount · {{month}}</small><b>Rp {{'{:,.0f}'.format((members|selectattr('id','equalto',current_user['id'])|map(attribute='approved_total')|first) or 0)}}</b></div>
   <div class="card stat"><small>Marketing Approved Amount · {{month}}</small><b>Rp {{'{:,.0f}'.format(dept_actual)}}</b></div>
 </div>
-<div class="card budget-card"><div class="section-title"><div><h2>Marketing Budget Control</h2><p class="muted">Approved entertainment compared with Accounting's monthly budget.</p></div><span class="pill">{{month}}</span></div>{% if budget_amount %}<div class="budget-row"><strong>Actual: Rp {{'{:,.0f}'.format(dept_actual)}}</strong><strong>Budget: Rp {{'{:,.0f}'.format(budget_amount)}}</strong><strong>{{'{:.1f}'.format(utilization)}}% used</strong></div><div class="budget-chart"><div class="chart-label">Actual</div><div class="chart-track"><div class="chart-bar actual" style="width:{{[utilization,100]|min}}%"></div></div><div class="chart-value">Rp {{'{:,.0f}'.format(dept_actual)}}</div><div class="chart-label">Budget</div><div class="chart-track"><div class="chart-bar budget" style="width:100%"></div></div><div class="chart-value">Rp {{'{:,.0f}'.format(budget_amount)}}</div></div><div class="progress"><div style="width:{{[utilization,100]|min}}%"></div></div>{% else %}<div class="empty-budget">Accounting budget has not been set for {{month}} yet.</div>{% endif %}</div>
-<div class="card"><div class="section-title"><div><h2>Entertainment by Member</h2><p class="muted">Approved amount per Marketing member for {{month}}.</p></div></div><table><tr><th>Member</th><th>Requests</th><th>Submitted Amount</th><th>Approved Amount</th></tr>{% for m in members %}<tr><td>{{m['name']}}{% if m['id']==current_user['id'] %} <span class="mini-tag">You</span>{% endif %}</td><td>{{m['request_count']}}</td><td>Rp {{'{:,.0f}'.format(m['submitted_total'])}}</td><td>Rp {{'{:,.0f}'.format(m['approved_total'])}}</td></tr>{% else %}<tr><td colspan="4" class="muted center">No member data.</td></tr>{% endfor %}</table></div>
+
+<div class="card budget-card">
+  <div class="section-title"><div><h2>Marketing Entertainment Budget</h2><p class="muted">Monthly approved entertainment amount compared with Accounting budget.</p></div><span class="pill">6-month view</span></div>
+  <div class="budget-legend"><span><i class="legend-box actual"></i> Approved Entertainment</span><span><i class="legend-line"></i> Accounting Budget</span></div>
+  <div class="monthly-chart">
+    <div class="chart-gridlines"><span></span><span></span><span></span><span></span></div>
+    <svg class="budget-line" viewBox="0 0 600 220" preserveAspectRatio="none" aria-hidden="true">
+      {% set pts=[] %}
+      {% for item in chart_months %}{% set x=50 + loop.index0*100 %}{% set y=190 - ((item.budget/chart_max)*150) %}{% set _=pts.append(x|string + ',' + y|string) %}{% endfor %}
+      <polyline points="{{pts|join(' ')}}" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      {% for item in chart_months %}{% set x=50 + loop.index0*100 %}{% set y=190 - ((item.budget/chart_max)*150) %}<circle cx="{{x}}" cy="{{y}}" r="4" fill="currentColor"></circle>{% endfor %}
+    </svg>
+    <div class="chart-bars">
+      {% for item in chart_months %}
+      <div class="month-col">
+        <div class="bar-area"><div class="actual-bar" style="height:{{(item.actual/chart_max*150)|round(2)}}px" title="Approved: Rp {{'{:,.0f}'.format(item.actual)}}"></div></div>
+        <div class="month-label">{{item.label}}</div>
+        <div class="month-values"><span>Rp {{'{:,.0f}'.format(item.actual)}}</span><small>Budget Rp {{'{:,.0f}'.format(item.budget)}}</small></div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<div class="card"><div class="section-title"><div><h2>Entertainment by Member</h2><p class="muted">Approved and submitted amount per Marketing member for {{month}}.</p></div></div><table><tr><th>Member</th><th>Requests</th><th>Submitted Amount</th><th>Approved Amount</th></tr>{% for m in members %}<tr><td>{{m['name']}}{% if m['id']==current_user['id'] %} <span class="mini-tag">You</span>{% endif %}</td><td>{{m['request_count']}}</td><td>Rp {{'{:,.0f}'.format(m['submitted_total'])}}</td><td>Rp {{'{:,.0f}'.format(m['approved_total'])}}</td></tr>{% else %}<tr><td colspan="4" class="muted center">No member data.</td></tr>{% endfor %}</table></div>
 <div class="card"><div class="section-title"><div><h2>My Requests</h2><p class="muted">Submit and track your own entertainment requests.</p></div></div><table><tr><th>Request No.</th><th>Date</th><th>Company</th><th>Place</th><th>Amount</th><th>Status</th><th></th></tr>{% for r in requests %}<tr><td>{{r['request_no']}}</td><td>{{r['entertainment_date']}}</td><td>{{r['company']}}</td><td>{{r['place']}}</td><td>Rp {{'{:,.0f}'.format(r['amount'])}}</td><td><span class="status {{r['status']|lower|replace(' ','-')}}">{{r['status']}}</span></td><td><a href="{{url_for('request_detail',rid=r['id'])}}">View</a>{% if r['status']!='Waiting Approval' %} · <a href="{{url_for('download',rid=r['id'])}}">PDF</a>{% endif %}</td></tr>{% else %}<tr><td colspan="7" class="muted center">No requests yet.</td></tr>{% endfor %}</table></div>
 {% endblock %}
