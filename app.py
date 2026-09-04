@@ -88,7 +88,7 @@ def login():
     if request.method=='POST':
         c=db(); u=c.execute('SELECT * FROM users WHERE username=?',(request.form['username'].strip(),)).fetchone(); c.close()
         if u and check_password_hash(u['password'],request.form['password']):
-            session.clear(); session.update(uid=u['id'],role=u['role'],name=u['name'])
+            session.clear(); session.update(uid=u['id'],role=u['role'],name=u['name'], dash_start=datetime.now().strftime('%Y-%m'), dash_end=datetime.now().strftime('%Y-%m'), admin_month=datetime.now().strftime('%Y-%m'))
             if u['must_change_password']: return redirect(url_for('change_password'))
             return redirect(url_for('index'))
         flash('Invalid username or password','error')
@@ -126,16 +126,25 @@ def valid_month(m):
 
 def dashboard_range():
     today=datetime.now().strftime('%Y-%m')
-    start=request.args.get('start_month','').strip() or today
-    end=request.args.get('end_month','').strip() or today
-    if not valid_month(start): start=today
-    if not valid_month(end): end=today
-    if start>end: start,end=end,start
-    # Keep the dashboard responsive while still allowing arbitrary practical ranges.
-    sy,sm=map(int,start.split('-')); ey,em=map(int,end.split('-'))
-    span=(ey-sy)*12+(em-sm)+1
-    if span>36:
-        ey=sy+(sm-1+35)//12; em=(sm-1+35)%12+1; end=f'{ey:04d}-{em:02d}'
+    # Range is stored in the login session. It stays unchanged across
+    # request submissions/navigation and only resets on the next login.
+    start=request.args.get('start_month','').strip()
+    end=request.args.get('end_month','').strip()
+    if start or end:
+        start=start if valid_month(start) else session.get('dash_start',today)
+        end=end if valid_month(end) else session.get('dash_end',today)
+        if start>end: start,end=end,start
+        sy,sm=map(int,start.split('-')); ey,em=map(int,end.split('-'))
+        span=(ey-sy)*12+(em-sm)+1
+        if span>36:
+            end=add_months(start,35)
+        session['dash_start'],session['dash_end']=start,end
+    else:
+        start=session.get('dash_start',today)
+        end=session.get('dash_end',today)
+        if not valid_month(start): start=today
+        if not valid_month(end): end=today
+        if start>end: start,end=end,start
     return start,end
 
 
@@ -252,9 +261,16 @@ def reject(rid):
 def admin_dashboard():
     r=login_required('admin')
     if r:return r
-    month=request.args.get('month','').strip() or datetime.now().strftime('%Y-%m')
-    if not valid_month(month): month=datetime.now().strftime('%Y-%m')
-    c=db(); users=c.execute('SELECT id,username,name,role,department,must_change_password FROM users ORDER BY id').fetchall(); stats=c.execute("SELECT status,COUNT(*) n,COALESCE(SUM(cost_actual),SUM(amount),0) total FROM requests GROUP BY status").fetchall(); rows=c.execute('SELECT r.*,u.name member_name FROM requests r JOIN users u ON u.id=r.member_id ORDER BY r.id DESC LIMIT 100').fetchall()
+    requested_month=request.args.get('month','').strip()
+    if requested_month and valid_month(requested_month):
+        month=requested_month
+        session['admin_month']=month
+    else:
+        month=session.get('admin_month',datetime.now().strftime('%Y-%m'))
+        if not valid_month(month):
+            month=datetime.now().strftime('%Y-%m')
+            session['admin_month']=month
+    c=db(); users=c.execute('SELECT id,username,name,role,department,must_change_password FROM users ORDER BY id').fetchall(); managers=c.execute("SELECT id,name FROM users WHERE role='manager' ORDER BY name").fetchall(); stats=c.execute("SELECT status,COUNT(*) n,COALESCE(SUM(cost_actual),SUM(amount),0) total FROM requests GROUP BY status").fetchall(); rows=c.execute('SELECT r.*,u.name member_name FROM requests r JOIN users u ON u.id=r.member_id ORDER BY r.id DESC LIMIT 100').fetchall()
     budget=c.execute("SELECT amount FROM budgets WHERE month=? AND department='Marketing'",(month,)).fetchone(); budget=budget['amount'] if budget else 0
     summary=[]; start=add_months(month,-11)
     cur=start
@@ -264,7 +280,7 @@ def admin_dashboard():
         appr=c.execute("SELECT COALESCE(SUM(cost_actual),SUM(amount),0) total FROM requests r JOIN users u ON u.id=r.member_id WHERE u.department='Marketing' AND r.status='Approved' AND strftime('%Y-%m',r.entertainment_date)=?",(cur,)).fetchone()['total'] or 0
         summary.append({'month':cur,'label':datetime.strptime(cur,'%Y-%m').strftime("%b'%y"),'budget':float(b['amount']) if b else 0,'submitted':float(sub),'approved':float(appr)})
         cur=add_months(cur,1)
-    c.close(); return render_template('admin.html',users=users,stats=stats,rows=rows,month=month,budget=budget,summary=summary)
+    c.close(); return render_template('admin.html',users=users,managers=managers,stats=stats,rows=rows,month=month,budget=budget,summary=summary)
 
 @app.route('/admin/budget',methods=['POST'])
 def set_budget():
@@ -273,7 +289,37 @@ def set_budget():
     month=request.form.get('month','').strip()
     try: amount=float(request.form.get('budget') or 0); datetime.strptime(month,'%Y-%m')
     except ValueError: flash('Invalid month or budget.','error'); return redirect(url_for('admin_dashboard'))
-    c=db(); c.execute("INSERT INTO budgets(month,department,amount,updated_at) VALUES(?,?,?,?) ON CONFLICT(month) DO UPDATE SET amount=excluded.amount,updated_at=excluded.updated_at",(month,'Marketing',amount,datetime.now().isoformat(timespec='seconds'))); c.commit(); c.close(); flash('Marketing monthly budget updated.','message'); return redirect(url_for('admin_dashboard',month=month))
+    c=db(); c.execute("INSERT INTO budgets(month,department,amount,updated_at) VALUES(?,?,?,?) ON CONFLICT(month) DO UPDATE SET amount=excluded.amount,updated_at=excluded.updated_at",(month,'Marketing',amount,datetime.now().isoformat(timespec='seconds'))); c.commit(); c.close(); session['admin_month']=month; flash('Marketing monthly budget updated.','message'); return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/users/create', methods=['POST'])
+def create_user():
+    r=login_required('admin')
+    if r:return r
+    username=request.form.get('username','').strip()
+    name=request.form.get('name','').strip()
+    role=request.form.get('role','member').strip()
+    department=request.form.get('department','Marketing').strip() or 'Marketing'
+    password=request.form.get('password','')
+    manager_id=request.form.get('manager_id','').strip() or None
+    if role not in ('member','manager','admin'):
+        flash('Invalid role.','error'); return redirect(url_for('admin_dashboard'))
+    if len(password)<8:
+        flash('Initial password must be at least 8 characters.','error'); return redirect(url_for('admin_dashboard'))
+    if not username or not name:
+        flash('Name and username are required.','error'); return redirect(url_for('admin_dashboard'))
+    try:
+        manager_id=int(manager_id) if manager_id else None
+    except ValueError:
+        manager_id=None
+    c=db()
+    try:
+        c.execute('INSERT INTO users(username,password,name,role,manager_id,department,must_change_password) VALUES(?,?,?,?,?,?,1)',(username,generate_password_hash(password),name,role,manager_id,department))
+        c.commit(); flash(f'Account {username} created. User must change the initial password at first login.','message')
+    except sqlite3.IntegrityError:
+        flash('Username already exists. Please use another username.','error')
+    finally:
+        c.close()
+    return redirect(url_for('admin_dashboard'))
 
 @app.route('/download/<int:rid>')
 def download(rid):
@@ -305,18 +351,18 @@ def download(rid):
         rows.append([Paragraph('Name (Title)' if i==0 else '',base),Paragraph(f'{i+1}.',base),Paragraph(pn(p1),base),Paragraph(f'{i+6}.',base),Paragraph(pn(p2),base)])
     pt=Table(rows,colWidths=[31*mm,10*mm,100*mm,10*mm,108*mm],rowHeights=[8.5*mm]*5)
     pt.setStyle(TableStyle([('BOX',(1,0),(-1,-1),.6,colors.black),('INNERGRID',(1,0),(-1,-1),.35,colors.black),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),3),('RIGHTPADDING',(0,0),(-1,-1),3)])); story.append(pt)
-    details=Table([[Paragraph('<b>* Purpose</b>',base),Paragraph(': '+esc(req['purpose']),base),Paragraph('<b>* Cost Estimation</b>',base),Paragraph(': '+money(req['cost_estimation']),base)],['','',Paragraph('<b>* Cost Actual</b>',base),Paragraph(': '+money(req['cost_actual']),base)],['','',Paragraph('<b>* Place</b>',base),Paragraph(': '+esc(req['place']),base)]],colWidths=[31*mm,100*mm,40*mm,88*mm],rowHeights=[9*mm,8*mm,8*mm])
+    details=Table([[Paragraph('<b>* Purpose</b>',base),Paragraph(': '+esc(req['purpose']),base),Paragraph('<b>* Cost Estimation</b>',base),Paragraph(': '+money(req['cost_estimation']),base)],['', '',Paragraph('<b>* Cost Actual</b>',base),Paragraph(': '+money(req['cost_actual']),base)],['','',Paragraph('<b>* Place</b>',base),Paragraph(': '+esc(req['place']),base)]],colWidths=[31*mm,100*mm,40*mm,88*mm],rowHeights=[9*mm,8*mm,8*mm])
     details.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LINEBELOW',(1,0),(1,-1),.35,colors.black),('LINEBELOW',(3,0),(3,-1),.35,colors.black)])); story.append(Spacer(1,3*mm)); story.append(details)
     sm=[x['name'] for x in sugity][:7]
     while len(sm)<7: sm.append('')
-    sugrows=[['Sugity Members','']]+[[sm[i],sm[i+1] if i+1<7 else ''] for i in range(0,7,2)] + [['',''],['',''],['','']]
-    sug=Table(sugrows,colWidths=[45*mm,45*mm],rowHeights=[8*mm]+[6.2*mm]*7)
+    sugrows=[['Sugity Members','']]+[[sm[i],sm[i+1] if i+1<7 else ''] for i in range(0,7,2)]
+    sug=Table(sugrows,colWidths=[45*mm,45*mm],rowHeights=[8*mm]+[6.8*mm]*4)
     sug.setStyle(TableStyle([('SPAN',(0,0),(1,0)),('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-    div=Table([['Proposed Division','','',''],['','MGR','GM','DIR'],['PLAN','','',''],['ACTUAL','','','']],colWidths=[16*mm,34*mm,34*mm,34*mm],rowHeights=[8*mm,8*mm,6.8*mm,6.8*mm])
+    div=Table([['Proposed Division','','',''],['','MGR','GM','DIR'],['PLAN','','',''],['ACTUAL','','','']],colWidths=[18*mm,32*mm,32*mm,32*mm],rowHeights=[8*mm,8*mm,6.8*mm,6.8*mm])
     div.setStyle(TableStyle([('SPAN',(0,0),(3,0)),('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-    acc=Table([['Accounting'],[''],[''],[''],['']],colWidths=[47*mm],rowHeights=[8*mm,8*mm,6.8*mm,6.8*mm,6.8*mm])
+    acc=Table([['Accounting'],[''],[''],['']],colWidths=[47*mm],rowHeights=[8*mm,8*mm,6.8*mm,6.8*mm])
     acc.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.6,colors.black),('INNERGRID',(0,0),(-1,-1),.35,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER'),('VALIGN',(0,0),(-1,-1),'MIDDLE')]))
-    lower=Table([[sug,div,acc]],colWidths=[90*mm,118*mm,47*mm],rowHeights=[51.4*mm]); lower.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)])); story.append(Spacer(1,3*mm)); story.append(lower)
+    lower=Table([[sug,div,acc]],colWidths=[90*mm,114*mm,47*mm],rowHeights=[35.2*mm]); lower.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)])); story.append(Spacer(1,3*mm)); story.append(lower)
     story.append(Spacer(1,2.5*mm)); meta=Table([[Paragraph(f'Request No.: {esc(req["request_no"])}',base),Paragraph(f'Status: {esc(req["status"])}',base),Paragraph('Receipt: retained in system',base)]],colWidths=[100*mm,70*mm,81*mm]); meta.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),2)])); story.append(meta)
     doc.build(story); buf.seek(0); return send_file(buf,as_attachment=True,download_name=f"{req['request_no']}.pdf",mimetype='application/pdf')
 
