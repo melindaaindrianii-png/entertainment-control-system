@@ -235,11 +235,26 @@ def new_request():
             saved.append(filename)
             receipt_payloads.append((filename, receipt.mimetype or 'application/octet-stream', receipt.read()))
         reqno='ENT-'+datetime.now().strftime('%Y%m%d')+'-'+uuid.uuid4().hex[:5].upper()
-        c=db(); cur=cur=c.execute('''INSERT INTO requests(request_no,member_id,company,people_count,place,amount,entertainment_date,receipt_file,receipt_files,status,submitted_at,purpose,cost_estimation,cost_actual)
-                                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',(reqno,session['uid'],company,count,place,actual,datev,saved[0],json.dumps(saved),'Waiting Approval',datetime.now().isoformat(timespec='seconds'),purpose,estimation,actual)); rid=cur.fetchone()['id']
-        for n,l in zip(names,levels): c.execute('INSERT INTO entertained_people(request_id,name,level) VALUES(%s,%s,%s)',(rid,n.strip(),l.strip()))
-        for n in sugity_names: c.execute('INSERT INTO sugity_members(request_id,name) VALUES(%s,%s)',(rid,n))
-        c.commit(); c.close(); return redirect(url_for('member_dashboard'))
+        c=db()
+        try:
+            row=c.execute('''INSERT INTO requests(request_no,member_id,company,people_count,place,amount,entertainment_date,receipt_file,receipt_files,status,submitted_at,purpose,cost_estimation,cost_actual)
+                             VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',
+                          (reqno,session['uid'],company,count,place,actual,datev,saved[0],json.dumps(saved),'Waiting Approval',
+                           datetime.now().isoformat(timespec='seconds'),purpose,estimation,actual)).fetchone()
+            rid=row['id']
+            for n,l in zip(names,levels):
+                c.execute('INSERT INTO entertained_people(request_id,name,level) VALUES(%s,%s,%s)',(rid,n.strip(),l.strip()))
+            for n in sugity_names:
+                c.execute('INSERT INTO sugity_members(request_id,name) VALUES(%s,%s)',(rid,n))
+            for (filename,mime_type,data) in receipt_payloads:
+                c.execute('INSERT INTO receipts(request_id,filename,mime_type,data) VALUES(%s,%s,%s,%s)',(rid,filename,mime_type,data))
+            c.commit()
+        except Exception:
+            c.rollback()
+            c.close()
+            raise
+        c.close()
+        return redirect(url_for('member_dashboard'))
     return render_template('new_request.html')
 
 @app.route('/request/<int:rid>')
@@ -327,13 +342,22 @@ def create_user():
     try:
         manager_id=int(manager_id) if manager_id else None
     except ValueError:
-        manager_id=None
+        flash('Invalid manager selection.','error'); return redirect(url_for('admin_dashboard'))
+
     c=db()
     try:
-        c.execute('INSERT INTO users(username,password,name,role,manager_id,department,must_change_password) VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE)',(username,generate_password_hash(password),name,role,manager_id,department))
-        c.commit(); flash(f'Account {username} created. User must change the initial password at first login.','message')
+        c.execute('''INSERT INTO users(username,password,name,role,manager_id,department,must_change_password)
+                     VALUES(%s,%s,%s,%s,%s,%s,TRUE)''',
+                  (username,generate_password_hash(password),name,role,manager_id,department))
+        c.commit()
+        flash(f'Account {username} created. User must change the initial password at first login.','message')
     except UniqueViolation:
+        c.rollback()
         flash('Username already exists. Please use another username.','error')
+    except psycopg.Error:
+        c.rollback()
+        app.logger.exception('Database error while creating user')
+        flash('The account could not be created because of a database error. No changes were saved.','error')
     finally:
         c.close()
     return redirect(url_for('admin_dashboard'))
@@ -382,5 +406,10 @@ def download(rid):
     lower=Table([[sug,div,acc]],colWidths=[90*mm,114*mm,47*mm],rowHeights=[35.2*mm]); lower.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)])); story.append(Spacer(1,3*mm)); story.append(lower)
     story.append(Spacer(1,2.5*mm)); meta=Table([[Paragraph(f'Request No.: {esc(req["request_no"])}',base),Paragraph(f'Status: {esc(req["status"])}',base),Paragraph('Receipt: retained in system',base)]],colWidths=[100*mm,70*mm,81*mm]); meta.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,-1),2)])); story.append(meta)
     doc.build(story); buf.seek(0); return send_file(buf,as_attachment=True,download_name=f"{req['request_no']}.pdf",mimetype='application/pdf')
+
+@app.errorhandler(500)
+def internal_error(error):
+    app.logger.exception('Unhandled application error')
+    return '<h1>Something went wrong</h1><p>The system could not complete that action. No changes were saved. Please try again.</p>', 500
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.environ.get('PORT',5000)),debug=True)
