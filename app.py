@@ -117,7 +117,7 @@ def change_password():
             c.close(); flash('Current password is incorrect.','error'); return render_template('change_password.html')
         if len(new)<8: c.close(); flash('New password must be at least 8 characters.','error'); return render_template('change_password.html')
         if new!=confirm: c.close(); flash('New password and confirmation do not match.','error'); return render_template('change_password.html')
-        c.execute('UPDATE users SET password=%s,must_change_password=0 WHERE id=%s',(generate_password_hash(new),session['uid'])); c.commit(); c.close()
+        c.execute('UPDATE users SET password=%s,must_change_password=FALSE WHERE id=%s',(generate_password_hash(new),session['uid'])); c.commit(); c.close()
         flash('Password changed successfully.','message'); return redirect(url_for('index'))
     return render_template('change_password.html')
 
